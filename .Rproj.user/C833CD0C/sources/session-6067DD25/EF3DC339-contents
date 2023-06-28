@@ -1,0 +1,369 @@
+# saveas from 02-geoplot-ICS.R
+# MVP / art-of-possible quick script
+# for 12/01/2022 request (Lisa Austin)
+# last updated 21/01/2022
+
+library(rgdal)
+library(readxl)
+library(openxlsx)
+library(ggplot2)
+library(tidyverse)
+library(leaflet)
+library(htmlwidgets)
+
+#https://rpubs.com/mattdray/basic-leaflet-maps
+
+setwd("G:/Shared drives/NHSX Analytics Unit/Programme Analytics Branch/Analytics Team/WGLL and soft-DMAs/EPRvisualisation - January22")
+
+#########################################################
+############ Load ICS master from 01ICS-main.R #########
+########################################################
+
+master_ICS <- read_xlsx("ICS_master.xlsx") # load previously curated ICS file
+
+
+#########################################################
+############ Load trusts master from 01-main.R #########
+########################################################
+
+master_trust_mt <- read_xlsx("trusts_master.xlsx") # load previously curated trust file
+
+## load additional January information
+master_trust_EPR <- read_xlsx("EPR Analysis MASTER_v16.xlsx",sheet="Organisation Overview") # Load MASTER file v16, from futureNHS
+
+#colkeep = c("Org_Code","GDE/FF/DA","Proxy Digital Maturity 2021","Roadmap Group 2","Main EPR (now)") # keep only relevant columns
+
+#master_trust <- master_trust %>% left_join(master_trust_EPR %>% select(colkeep),by=c("Trust_Code"="Org_Code")) # join data
+
+master_trust <- master_trust_EPR %>% rename(`Main EPR (now)`=`Main EPR (data as at 12.1.22 - for analysis use to understand supplier spread)`)
+
+colkeep_mt <- c("Trust_Code","STP_Code_ODS","STP_Name_ODS","STP_Code","STP_Name")
+
+master_trust <- master_trust %>% left_join(master_trust_mt %>% select(colkeep_mt),by=c("Org Code"="Trust_Code")) # join data
+
+
+### Establish top EPR suppliers
+aux_order <- master_trust %>% group_by(`Main EPR (now)`) %>% summarise(n=n()) %>% arrange(desc(n))
+
+
+master_trust <- master_trust %>% mutate(MainEPRcat = as.factor(ifelse(`Main EPR (now)` %in% aux_order$`Main EPR (now)`[1:8],
+                                                               `Main EPR (now)`,
+                                                               "Other"))) # reduce number of EPR categories
+levs = c(aux_order$`Main EPR (now)`[1:8],"Other")
+master_trust <- master_trust %>% mutate(MainEPRcat = factor(MainEPRcat,levels=levs))
+
+#################################
+# Load shapefile
+#####################################
+
+stp_spdf <- readOGR("./shapefile_BUC/STP_APR_2021_EN_BUC_V2.shp") # load STP/ICS shapefile
+
+proj4string(stp_spdf) <- CRS("+init=epsg:27700")  # BNG projection system
+
+stp_spdf@proj4string
+
+stp_spdf <- stp_spdf %>% sp::spTransform(CRS("+init=epsg:4326")) # reproject to latlong system
+
+# Add alloc relevant info to Shapefile
+stp_spdf@data <- stp_spdf@data %>% left_join(master_ICS,by=c("STP21CD"))
+
+
+#############################################
+# Create a points shapefile for Trusts
+#############################################
+trust_spdf_points <- sp::SpatialPointsDataFrame(
+  coords = master_trust %>% select(Longitude,Latitude),
+  data = master_trust %>% select(-c(Longitude,Latitude)),
+  proj4string = CRS("+init=epsg:4326") # indicate it is is longitude latitude
+)
+
+#glimpse(trust_spdf_points)
+
+
+#############################################
+############### Leaflet - ICS ###################
+###########################################
+
+# Create a color palette with handmade bins.
+library(RColorBrewer)
+#mybins <- c(0,10,20,50,100,500,Inf)*1000000
+#mypalette <- colorBin( palette="YlOrBr", domain=world_spdf@data$POP2005, na.color="transparent", bins=mybins)
+
+# Prepare the text for ICS tooltips:
+mytext <- paste(
+  "<b> ICS/STP</b><br/>",
+  "<b>- STP code:</b> ", stp_spdf@data$STP21CD,", ",stp_spdf@data$STP21CDH,"<br/>",
+  "<b>- STP name:</b> ", stp_spdf@data$STP21NM.x,"<br/>",
+  "<b>- Region name:</b> ", stp_spdf@data$NHSER21NM,"<br/>",
+  sep="") %>%
+  lapply(htmltools::HTML)
+
+
+# ICS map ###########
+m<-leaflet(stp_spdf) %>% 
+  addTiles()  %>% 
+  setView( lat=53, lng=-2 , zoom=6.5) %>%
+  addPolygons( 
+    #fillColor = ~mypalette(ICS_PDMAScore),
+    fillColor = "white",
+    stroke=TRUE, 
+    fillOpacity = 0.8, 
+    color="darkgray", 
+    weight=3,
+    label = mytext,
+    labelOptions = labelOptions( 
+      style = list("font-weight" = "normal", padding = "3px 8px"), 
+      textsize = "13px", 
+      direction = "auto"
+    )
+  ) #%>%
+  #addLegend( pal=mypalette, values=~ICS_PDMAScore, opacity=0.9, title = "Proxy Digital Maturity Score", position = "bottomleft" )
+
+m  
+
+#https://rstudio.github.io/leaflet/markers.html
+
+
+
+###################################################
+############### Leaflet - with Trust ###################
+#####################################################
+
+##########################
+## Create setting icons ##
+##########################
+
+# Create a palette for 'circles' (any RGB/HEX) and one for 'pins' (very restricted choice)
+
+# palette for circles
+factpal <- colorFactor("RdYlBu", trust_spdf_points@data$MainEPRcat) # viridis
+factpal_x <- function(x){
+  ifelse(x=="NO EPR","#000000",factpal(x))
+}
+
+levs = master_trust$MainEPRcat %>% levels()
+palevs = factpal_x(levs)
+
+pal <- colorFactor(palette = palevs, 
+                   levels = levs)
+
+# palette for pins label
+palpinlevs <- c("orange","#426877","#37A7DA","#6FAB25","#6F7F23","#440D68","darkred","purple","red")
+#palpinlevs <- c("orange","cadetblue","blue","6FAB25","darkgreen","dark purple","darkred","purple","red")
+
+palpin <- colorFactor(palette = palpinlevs, 
+                      levels = levs)
+
+trust_spdf_points@data <- trust_spdf_points@data %>% mutate(
+  icon = case_when(STP_Code != STP_Code_ODS ~ "arrows-alt",
+                   TRUE ~ "bullseye"),
+  library = case_when(TRUE ~ "fa"),
+  marker_color_hex= pal(MainEPRcat),
+  #marker_color_hex= factpal_x(MainEPRcat),
+  #marker_color_hex = ifelse(MainEPRcat=="NO EPR","gray",factpal(MainEPRcat)),
+  marker_color = case_when(MainEPRcat=="NO EPR" ~ "orange",
+                           MainEPRcat=="Cerner" ~ "cadetblue",
+                           MainEPRcat=="Servelec" ~ "blue",
+                           MainEPRcat=="System C" ~ "green",
+                           MainEPRcat=="TPP" ~ "darkgreen",
+                           MainEPRcat=="Dedalus" ~ "darkpurple",
+                           MainEPRcat=="In House" ~ "darkred",
+                           MainEPRcat=="EPIC" ~ "purple",
+                           TRUE ~ "red"
+  )
+)
+
+
+
+  #https://stackoverflow.com/questions/59789918/how-to-get-the-colours-i-want-with-leaflet-awesomemarkers?rq=1
+  
+##########################
+## Create hover text    ##
+##########################
+get_popup_content <- function(my_spdf) {
+  paste0(
+    "<b>Provider </b>",
+     #"<br><b>- Provider code</b>:", my_spdf@data$Trust_Code,
+     "<br><b>- Provider name:</b> ", my_spdf@data$Org_Name,
+     "<br><b>- STP (finance-based):</b> ", my_spdf@data$STP_Name,
+    "<br><b>- STP/ICS (HQ postcode-based):</b> ", my_spdf@data$ICS,
+    "<br><b>- Trust type:</b> ", my_spdf@data$`Trust Type`,
+    "<br><b>- EPR supplier (12.1.2022):</b> ", my_spdf@data$`Main EPR (now)`,
+    "<br><b>- Funding Total (up to this 20/21):</b> ", paste0("? ",format(my_spdf@data$`Funding Total (up to this 20/21)`,nsmall=2,big.mark=",")),
+    "<br><b>- Funding Agreed (21/22):</b> ", paste0("? ",format(my_spdf@data$`Funding Agreed (21/22)`,nsmall=2,big.mark=",")),
+    "<br><b>- GDE/FF/DA:</b> ", my_spdf@data$`GDE/FF/DA`,
+    "<br><b>- Digital Maturity 2021: </b>", my_spdf@data$`Proxy Digital Maturity 2021`,
+    "<br><b>- Group of Journey:</b> ", my_spdf@data$`Group of Journey`,
+    "<br><b>- Stahe of Journey:</b> ", my_spdf@data$`Stage of Journey`,
+    sep="" 
+  )
+}
+
+
+####################################
+## Create map with inbuilt icons   ##
+#####################################
+
+map_trusts_2 <- m %>% 
+  leaflet::addAwesomeMarkers(
+    data = trust_spdf_points,
+    popup = ~get_popup_content(trust_spdf_points),
+    #label=~as.character(Organisation_Name),
+    label = ~ lapply(get_popup_content(trust_spdf_points), htmltools::HTML),
+    icon = awesomeIcons(
+      library = ~library,
+      icon = ~icon,
+      iconColor = "#FFFFFF",  # the icon's colour
+      markerColor = ~marker_color, # this does not accept hex... 
+      #text="1"
+      )
+  )
+
+map_trusts_2
+
+saveWidget(map_trusts_2, file=paste0( getwd(), "/HtmlWidget/AOPv02-cloro-ICS_Trust_",Sys.Date(),"-2.html"))
+
+
+
+
+######################################################
+## Create leaflet by four settings (pins)   ##
+####################################################
+
+map_trusts_3 <- m %>% 
+  leaflet::addAwesomeMarkers(
+    data = subset(trust_spdf_points, `Trust Type`=="Acute"),
+    #popup = ~get_popup_content(trust_spdf_points),
+    group = "Acute",
+    label = ~ lapply(get_popup_content(subset(trust_spdf_points, `Trust Type`=="Acute")), htmltools::HTML),
+    icon = awesomeIcons(
+      library = ~library,
+      icon = ~icon,
+      iconColor = "#FFFFFF",  # the icon's colour
+      markerColor = ~marker_color, # this does not accept hex... 
+      #text="1"
+    )
+  )
+
+map_trusts_3 <- map_trusts_3 %>% 
+  leaflet::addAwesomeMarkers(
+    data = subset(trust_spdf_points, `Trust Type`=="Mental Health"),
+    #popup = ~get_popup_content(trust_spdf_points),
+    group = "Mental Health",
+    label = ~ lapply(get_popup_content(subset(trust_spdf_points, `Trust Type`=="Mental Health")), htmltools::HTML),
+    icon = awesomeIcons(
+      library = ~library,
+      icon = ~icon,
+      iconColor = "#FFFFFF",  # the icon's colour
+      markerColor = ~marker_color, # this does not accept hex... 
+      #text="1"
+    )
+  )
+
+map_trusts_3 <- map_trusts_3 %>% 
+  leaflet::addAwesomeMarkers(
+    data = subset(trust_spdf_points, `Trust Type`=="Ambulance"),
+   # popup = ~get_popup_content(trust_spdf_points),
+    group = "Ambulance",
+    label = ~ lapply(get_popup_content(subset(trust_spdf_points, `Trust Type`=="Ambulance")), htmltools::HTML),
+    icon = awesomeIcons(
+      library = ~library,
+      icon = ~icon,
+      iconColor = "#FFFFFF",  # the icon's colour
+      markerColor = ~marker_color, # this does not accept hex... 
+      #text="1"
+    )
+  )
+
+map_trusts_3 <- map_trusts_3 %>% 
+  leaflet::addAwesomeMarkers(
+    data = subset(trust_spdf_points, `Trust Type`=="Community Health Services"),
+    #popup = ~get_popup_content(trust_spdf_points),
+    group = "Community",
+    label = ~ lapply(get_popup_content(subset(trust_spdf_points, `Trust Type`=="Community Health Services")), htmltools::HTML),
+    icon = awesomeIcons(
+      library = ~library,
+      icon = ~icon,
+      iconColor = "#FFFFFF",  # the icon's colour
+      markerColor = ~marker_color, # this does not accept hex... 
+      #text="1"
+    )
+  )
+
+
+map_trusts_3 <- map_trusts_3 %>% leaflet::addLayersControl(
+  overlayGroups = c("Acute","Mental Health","Ambulance","Community Health Services"),  # add these layers
+  options = layersControlOptions(collapsed = FALSE)  # expand on hover?
+) %>% 
+  hideGroup(c("Mental Health","Ambulance","Community Health Services"))  # turn these off by default
+
+
+map_trusts_3 <- map_trusts_3 %>%
+  addLegend("bottomright", pal = palpin, values = trust_spdf_points@data$MainEPRcat,
+          title = "EPR supplier",
+          #labFormat = labelFormat(prefix = ""),
+          opacity = 1
+)
+
+map_trusts_3
+
+saveWidget(map_trusts_3, file=paste0( getwd(), "/HtmlWidget/AOPv02-pins-cloro-ICS_Trust_",Sys.Date(),"-2.html"))
+
+
+####################################################
+## Create leaflet by four settings - circles   ##
+#################################################
+
+
+map_trusts_4 <- m %>%
+  addCircleMarkers(data=subset(trust_spdf_points, `Trust Type`=="Acute"),
+                   group="Acute",       
+                   label = ~ lapply(get_popup_content(subset(trust_spdf_points, `Trust Type`=="Acute")), htmltools::HTML),
+                   fillColor = ~marker_color_hex,
+                   color="#a9a9a9",
+                   weight=2,
+                   fillOpacity = 1,
+                   stroke = T,
+                   radius=~ifelse(MainEPRcat=="NO EPR",9,7)) %>%
+  addCircleMarkers(data=subset(trust_spdf_points, `Trust Type`=="Mental Health"),
+                   group="Mental Health",       
+                   label = ~ lapply(get_popup_content(subset(trust_spdf_points, `Trust Type`=="Mental Health")), htmltools::HTML),
+                   fillColor = ~marker_color_hex,
+                   color="#a9a9a9",
+                   weight=2,
+                   fillOpacity = 1,
+                   stroke = T,
+                   radius=~ifelse(MainEPRcat=="NO EPR",9,7)) %>%
+  addCircleMarkers(data=subset(trust_spdf_points, `Trust Type`=="Ambulance"),
+                   group="Ambulance",       
+                   label = ~ lapply(get_popup_content(subset(trust_spdf_points, `Trust Type`=="Ambulance")), htmltools::HTML),
+                   fillColor = ~marker_color_hex,
+                   color="#a9a9a9",
+                   weight=2,
+                   fillOpacity = 1,
+                   stroke = T,
+                   radius=~ifelse(MainEPRcat=="NO EPR",9,7)) %>%
+  addCircleMarkers(data=subset(trust_spdf_points, `Trust Type`=="Community Health Services"),
+                   group="Community Health Services",       
+                   label = ~ lapply(get_popup_content(subset(trust_spdf_points, `Trust Type`=="Community Health Services")), htmltools::HTML),
+                   fillColor = ~marker_color_hex,
+                   color="#a9a9a9",
+                   weight=2,
+                   fillOpacity = 1,
+                   stroke = T,
+                   radius=~ifelse(MainEPRcat=="NO EPR",9,7)) %>%
+  addLegend("bottomright", pal = pal, values = trust_spdf_points@data$MainEPRcat,
+            title = "EPR supplier",
+            #labFormat = labelFormat(prefix = ""),
+            opacity = 1
+  ) %>%
+  leaflet::addLayersControl(
+                     overlayGroups = c("Acute","Mental Health","Ambulance","Community Health Services"),  # add these layers
+                     options = layersControlOptions(collapsed = FALSE)  # expand on hover?
+                   ) %>% 
+  hideGroup(c("Mental Health","Ambulance","Community Health Services"))  # turn these off by default
+
+map_trusts_4
+
+saveWidget(map_trusts_4, file=paste0( getwd(), "/HtmlWidget/AOPv02-circles-cloro-ICS_Trust_",Sys.Date(),"-2.html"))
+
